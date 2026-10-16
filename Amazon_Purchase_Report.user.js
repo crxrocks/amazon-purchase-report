@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon Purchase Report
 // @namespace    local.amazon.purchase.report
-// @version      1.4.3
+// @version      1.4.4
 // @description  Collect Amazon Payments transactions across pages and show purchased items in one date-filtered report.
 // @match        https://www.amazon.com/cpe/yourpayments/transactions*
 // @homepageURL  https://github.com/crxrocks/amazon-purchase-report
@@ -17,7 +17,7 @@
   const SELECTORS = {
     payment: '.apx-transactions-line-item-component-container,[class*="transaction-line-item"]',
     date: '.apx-transaction-date-container,[class*="transaction-date"]',
-    order: 'a[href*="orderID="],a[href*="orderId="],a[href*="order-id="],a[href*="order-details"]'
+    order: 'a[href*="orderID="],a[href*="orderId="],a[href*="order-id="],a[href*="order-details"],a[href*="summary/edit"]'
   };
   const PAGE_DELAY = 700;
   const ORDER_DELAY = 550;
@@ -150,16 +150,25 @@
     return '';
   }
 
+  function orderLinks(root) {
+    return [...root.querySelectorAll('a[href]')].filter((link) => {
+      const href = decodeURIComponent(link.getAttribute('href') || '');
+      const label = clean(link.textContent);
+      return /order(?:ID|Id|-id)=|order-details|summary\/edit/i.test(href) ||
+        /\d{3}-\d{7}-\d{7}/.test(`${label} ${href}`);
+    });
+  }
+
   function paymentRows(doc) {
     const direct = [...doc.querySelectorAll(SELECTORS.payment)];
     if (direct.length) return direct.filter((row) => !direct.some((other) => other !== row && other.contains(row)));
 
     const rows = [];
     const seen = new Set();
-    for (const link of doc.querySelectorAll(SELECTORS.order)) {
+    for (const link of orderLinks(doc)) {
       let node = link.parentElement;
       for (let depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
-        if (money(node.textContent).length && node.querySelectorAll(SELECTORS.order).length === 1) {
+        if (money(node.textContent).length && orderLinks(node).length === 1) {
           if (!seen.has(node)) { seen.add(node); rows.push(node); }
           break;
         }
@@ -182,7 +191,7 @@
     }
 
     return rows.map((row) => {
-      const link = row.querySelector(SELECTORS.order);
+      const link = orderLinks(row)[0];
       if (!link) return null;
       const bold = [...row.querySelectorAll('.a-text-bold')].map((e) => clean(e.textContent));
       const charge = bold.find((v) => /^-?\$[\d,]+(?:\.\d{2})?$/.test(v)) || money(row.textContent)[0] || '';
@@ -235,6 +244,13 @@
     for (let page = 1; page <= MAX_PAGES; page += 1) {
       const bounds = pageDateBounds(doc);
       const payments = readPayments(doc);
+      if (!payments.length && page === 1) {
+        const links = orderLinks(doc).length;
+        const rows = paymentRows(doc).length;
+        const dates = [...doc.querySelectorAll(SELECTORS.date)].length;
+        const amounts = money(doc.body?.textContent).length;
+        throw new Error(`Transactions are visible but could not be recognized (diagnostic: ${rows} transaction rows, ${links} order links, ${dates} date headings, ${amounts} dollar amounts).`);
+      }
       if (payments.length && payments.every((payment) => !payment.paymentDate)) {
         throw new Error('Amazon transactions were found, but their dates could not be read. Please update the report script and try again.');
       }
