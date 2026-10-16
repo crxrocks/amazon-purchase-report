@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon Purchase Report
 // @namespace    local.amazon.purchase.report
-// @version      1.4.4
+// @version      1.4.5
 // @description  Collect Amazon Payments transactions across pages and show purchased items in one date-filtered report.
 // @match        https://www.amazon.com/cpe/yourpayments/transactions*
 // @homepageURL  https://github.com/crxrocks/amazon-purchase-report
@@ -199,8 +199,10 @@
       const linkText = clean(link.textContent).replace(/^Order\s*#/i, '');
       const orderNumber = (linkText.match(/\d{3}-\d{7}-\d{7}/) || decodeURIComponent(link.href).match(/\d{3}-\d{7}-\d{7}/))?.[0] || linkText;
       const date = parseDate(rowDates.get(row) || priorDate(row));
-      return { paymentDate: isoDate(date), charge, paymentMethod, orderNumber,
-        orderUrl: new URL(link.getAttribute('href'), location.origin).href };
+      const orderUrl = /^\d{3}-\d{7}-\d{7}$/.test(orderNumber)
+        ? new URL(`/gp/your-account/order-details?orderID=${encodeURIComponent(orderNumber)}`, location.origin).href
+        : new URL(link.getAttribute('href'), location.origin).href;
+      return { paymentDate: isoDate(date), charge, paymentMethod, orderNumber, orderUrl };
     }).filter(Boolean);
   }
 
@@ -287,7 +289,10 @@
     return '';
   }
 
-  function printableOrderUrl(url) {
+  function printableOrderUrl(url, orderNumber) {
+    if (/^\d{3}-\d{7}-\d{7}$/.test(orderNumber)) {
+      return new URL(`/gp/css/summary/print.html?orderID=${encodeURIComponent(orderNumber)}`, location.origin).href;
+    }
     const printable = new URL(url);
     printable.pathname = printable.pathname.replace(/\/edit\.html$/i, '/print.html');
     return printable.href;
@@ -338,9 +343,13 @@
         if (!items) {
           const response = await fetch(payment.orderUrl, { credentials: 'include', redirect: 'follow', cache: 'no-store' });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          items = itemsFromOrder(await response.text(), payment.orderUrl, payment.paymentDate);
+          const finalUrl = new URL(response.url);
+          if (finalUrl.origin === location.origin && /^\/$/.test(finalUrl.pathname)) {
+            throw new Error('Amazon redirected the order link to its home page');
+          }
+          items = itemsFromOrder(await response.text(), response.url, payment.paymentDate);
           if (items.some((item) => !item.itemPrice)) {
-            const printUrl = printableOrderUrl(payment.orderUrl);
+            const printUrl = printableOrderUrl(payment.orderUrl, payment.orderNumber);
             if (printUrl !== payment.orderUrl) {
               try {
                 const printResponse = await fetch(printUrl, { credentials: 'include', redirect: 'follow', cache: 'no-store' });
