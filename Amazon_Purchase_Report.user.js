@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon Purchase Report
 // @namespace    local.amazon.purchase.report
-// @version      1.4.2
+// @version      1.4.3
 // @description  Collect Amazon Payments transactions across pages and show purchased items in one date-filtered report.
 // @match        https://www.amazon.com/cpe/yourpayments/transactions*
 // @homepageURL  https://github.com/crxrocks/amazon-purchase-report
@@ -15,9 +15,9 @@
   'use strict';
 
   const SELECTORS = {
-    payment: '.apx-transactions-line-item-component-container',
-    date: '.apx-transaction-date-container',
-    order: 'a[href*="/gp/css/summary/edit.html"][href*="orderID="]'
+    payment: '.apx-transactions-line-item-component-container,[class*="transaction-line-item"]',
+    date: '.apx-transaction-date-container,[class*="transaction-date"]',
+    order: 'a[href*="orderID="],a[href*="orderId="],a[href*="order-id="],a[href*="order-details"]'
   };
   const PAGE_DELAY = 700;
   const ORDER_DELAY = 550;
@@ -40,6 +40,11 @@
     return match ? Number(match[1].replace(/,/g, '')) : null;
   };
   const dollars = (value) => `$${Math.abs(value).toFixed(2)}`;
+  const extractDateText = (value) => {
+    const text = clean(value);
+    const match = text.match(/\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\b|\b\d{1,2}\/\d{1,2}\/\d{4}\b/i);
+    return match?.[0] || '';
+  };
 
   function installStyles() {
     const style = document.createElement('style');
@@ -133,25 +138,58 @@
 
   function priorDate(row) {
     let level = row;
-    for (let depth = 0; level && depth < 5; depth += 1, level = level.parentElement) {
+    for (let depth = 0; level && depth < 8; depth += 1, level = level.parentElement) {
       for (let node = level.previousElementSibling; node; node = node.previousElementSibling) {
-        if (node.matches?.(SELECTORS.date)) return clean(node.textContent);
+        if (node.matches?.(SELECTORS.date)) return extractDateText(node.textContent);
         const nested = node.querySelector?.(SELECTORS.date);
-        if (nested) return clean(nested.textContent);
+        if (nested) return extractDateText(nested.textContent);
+        const nearby = extractDateText(node.textContent);
+        if (nearby && clean(node.textContent).length < 500) return nearby;
       }
     }
     return '';
   }
 
+  function paymentRows(doc) {
+    const direct = [...doc.querySelectorAll(SELECTORS.payment)];
+    if (direct.length) return direct.filter((row) => !direct.some((other) => other !== row && other.contains(row)));
+
+    const rows = [];
+    const seen = new Set();
+    for (const link of doc.querySelectorAll(SELECTORS.order)) {
+      let node = link.parentElement;
+      for (let depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
+        if (money(node.textContent).length && node.querySelectorAll(SELECTORS.order).length === 1) {
+          if (!seen.has(node)) { seen.add(node); rows.push(node); }
+          break;
+        }
+      }
+    }
+    return rows;
+  }
+
   function readPayments(doc) {
-    return [...doc.querySelectorAll(SELECTORS.payment)].map((row) => {
+    const rows = paymentRows(doc);
+    const rowDates = new Map();
+    let currentDate = '';
+    const entries = [
+      ...[...doc.querySelectorAll(SELECTORS.date)].map((node) => ({ node, type: 'date' })),
+      ...rows.map((node) => ({ node, type: 'row' }))
+    ].sort((a, b) => (a.node.compareDocumentPosition(b.node) & 4) ? -1 : 1);
+    for (const entry of entries) {
+      if (entry.type === 'date') currentDate = extractDateText(entry.node.textContent);
+      else rowDates.set(entry.node, currentDate);
+    }
+
+    return rows.map((row) => {
       const link = row.querySelector(SELECTORS.order);
       if (!link) return null;
       const bold = [...row.querySelectorAll('.a-text-bold')].map((e) => clean(e.textContent));
       const charge = bold.find((v) => /^-?\$[\d,]+(?:\.\d{2})?$/.test(v)) || money(row.textContent)[0] || '';
       const paymentMethod = bold.find((v) => v !== charge) || '';
-      const orderNumber = clean(link.textContent).replace(/^Order\s*#/i, '');
-      const date = parseDate(priorDate(row));
+      const linkText = clean(link.textContent).replace(/^Order\s*#/i, '');
+      const orderNumber = (linkText.match(/\d{3}-\d{7}-\d{7}/) || decodeURIComponent(link.href).match(/\d{3}-\d{7}-\d{7}/))?.[0] || linkText;
+      const date = parseDate(rowDates.get(row) || priorDate(row));
       return { paymentDate: isoDate(date), charge, paymentMethod, orderNumber,
         orderUrl: new URL(link.getAttribute('href'), location.origin).href };
     }).filter(Boolean);
@@ -197,6 +235,9 @@
     for (let page = 1; page <= MAX_PAGES; page += 1) {
       const bounds = pageDateBounds(doc);
       const payments = readPayments(doc);
+      if (payments.length && payments.every((payment) => !payment.paymentDate)) {
+        throw new Error('Amazon transactions were found, but their dates could not be read. Please update the report script and try again.');
+      }
       const signature = payments.map((p) => `${p.paymentDate}|${p.orderNumber}|${p.charge}`).join(';');
       if (!signature || seenPages.has(signature)) break;
       seenPages.add(signature);
